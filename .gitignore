@@ -1,3 +1,11 @@
+data/*
+Debug/*
+test/*
+*.sln
+*.suo
+*.sdf
+*.opensdf
+
 # Compiled Object files
 *.slo
 *.lo
