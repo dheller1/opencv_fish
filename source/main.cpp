@@ -20,19 +20,32 @@ int main(int argc, char** argv)
 	// variable initialization
 	int keyInput = 0;
 	int nFrames = 0, nSmoothFrames = 0, nFailedFrames = 0;
+	int nTrackedFrames = 0;
 	bool bJump = false;
 	bool bHardTracking = false;
 	Mat curFrame, fgMaskMOG2, fgMaskKNN, bgImg, frameDelta, frameDeltaThr, frameDil, grayFrame;
-	const char* filename = "../test/Video01_09Nov2015.mp4\0";
-	Ptr<BackgroundSubtractor> pKNN;
+	//const char* filename = "../test/Video02_09Nov2015.mp4\0";
+	
+	if (argc < 2) {
+		cerr << "Please provide input video filename." << endl;
+		return EXIT_FAILURE;
+	}
+	
+	string filename(argv[1]);
+	//cout << "File: " << filename << endl;
+
 	Ptr<BackgroundSubtractor> pMOG2;
 	Rect lastSmoothRect;
 	Point lastSmoothPos;
 
 	VideoWriter outputVideo;
+	
+	// construct output_name
+	string outName = filename.substr(0, filename.length()-4) + "_out.avi";
+
 
 	const unsigned int DELTA_SQ_THRESH = 20000;
-	const unsigned int CONTOUR_AREA_THRESH = 400;
+	const unsigned int CONTOUR_AREA_THRESH = 200;
 
 	Point lastPos, pRectMid;
 
@@ -59,7 +72,7 @@ int main(int argc, char** argv)
 
 	Size vidS = Size((int)capture.get(CV_CAP_PROP_FRAME_WIDTH), (int)capture.get(CV_CAP_PROP_FRAME_HEIGHT));
 	int fourcc = capture.get(CV_CAP_PROP_FOURCC);
-	outputVideo.open("test_out.avi", CV_FOURCC('P','I','M','1'), capture.get(CV_CAP_PROP_FPS), vidS, true);
+	outputVideo.open(outName, CV_FOURCC('P','I','M','1'), capture.get(CV_CAP_PROP_FPS), vidS, true);
 	if (!outputVideo.isOpened())
 	{
 		cerr << "Unable to write to output video." << endl;
@@ -67,7 +80,6 @@ int main(int argc, char** argv)
 	}
 
 	// build frame buffer and background subtractor
-	pKNN = createBackgroundSubtractorKNN();
 	pMOG2 = createBackgroundSubtractorMOG2(500, 30., true);
 
 	// build mog once
@@ -176,21 +188,22 @@ int main(int argc, char** argv)
 		// draw only the largest object
 		if (!bJump)
 		{
+			++nTrackedFrames;
 			if (lastKnownPositions.size() > LAST_POS_BUFFER_SIZE)
 				lastKnownPositions.pop_front();
 			lastKnownPositions.push_back(pRectMid);
 
-			//list<Point>::iterator it;
-			//int i = 0;
-			//for (it = lastKnownPositions.begin(); it != lastKnownPositions.end(); it++)
-			//{
-			//	Scalar color(150, 150, 150);
-			//	circle(curFrame, *it, 5, color, 2 * i);
-			//	++i;
-			//}
+			list<Point>::iterator it;
+			int i = 0;
+			for (it = lastKnownPositions.begin(); it != lastKnownPositions.end(); it++)
+			{
+				Scalar color(150, 30, 30);
+				circle(curFrame, *it, 5, color, 2 * i);
+				++i;
+			}
 
-			rectangle(curFrame, maxRect, Scalar(0, 255, 0), 3);
 			circle(curFrame, pRectMid, 5, Scalar(255, 0, 0), 10, 8);
+			rectangle(curFrame, maxRect, Scalar(0, 255, 0), 3);
 		}
 		else
 		{
@@ -202,7 +215,7 @@ int main(int argc, char** argv)
 		}
 
 		// draw text overlay
-		ostringstream str, str2, str3;
+		ostringstream str, str2, str3, str4;
 		int line = 0;
 		const int lineSkip = 16;
 
@@ -219,6 +232,12 @@ int main(int argc, char** argv)
 		putText(curFrame, str3.str(), Point(10, 22 + line*lineSkip), CV_FONT_HERSHEY_PLAIN, 1., Scalar(180., 0., 0.));
 		++line;
 
+		// tracking percentage
+		str4 << "Tracking rate: " << setprecision(2) << 100.0*nTrackedFrames / nFrames << "%";
+		putText(curFrame, str4.str(), Point(10, 22 + line*lineSkip), CV_FONT_HERSHEY_PLAIN, 1., Scalar(180., 0., 0.));
+		++line;
+
+
 		contours.clear();
 		hierarchy.clear();
 
@@ -226,7 +245,7 @@ int main(int argc, char** argv)
 
 		imshow("Motion tracking", curFrame);
 
-		keyInput = waitKey(30);
+		keyInput = waitKey(15);
 	}
 
 	waitKey(0);
