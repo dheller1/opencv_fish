@@ -1,9 +1,4 @@
 #include <opencv2/opencv.hpp>
-#include "opencv2/imgcodecs.hpp"
-#include "opencv2/imgproc.hpp"
-#include "opencv2/videoio.hpp"
-#include <opencv2/highgui.hpp>
-#include <opencv2/video.hpp>
 #include <iostream>
 #include <iomanip>
 #include <vector>
@@ -27,15 +22,13 @@ int main(int argc, char** argv)
 {
 	// variable initialization
 	int keyInput = 0;
-	int nFrames = 0, nSmoothFrames = 0, nFailedFrames = 0;
-	int nTrackedFrames = 0;
-	bool bJump = false;
-	bool bHardTracking = false;
-
-	bool bOverlay = false;			// plot overlay?
+	int nFrames = 0, nSmoothFrames = 0, nFailedFrames = 0, nBlindFrames = 0;
+	int lastDx = 0, lastDy = 0;
+	
+	bool bOverlay = true;			// plot overlay?
 	bool bTrace = true & bOverlay;	// plot 'bubble' trace? (only when overlay active)
 	
-	Ptr<BackgroundSubtractor> pMOG2, pMOG2Natural;
+	Ptr<BackgroundSubtractor> pMOG2;
 
 	VideoCapture capture;		// input video capture
 	VideoWriter outputVideo;	// output video writer
@@ -47,8 +40,8 @@ int main(int argc, char** argv)
 		frameDil,		// dilated grayscale frame
 		canny_out;		// output of Canny algorithm for shape outline detection
 
-	Mat *pOutMat = &frameDil;	// pointer to image that will be rendered once per input video frame
-	Mat strucElem = getStructuringElement(MORPH_RECT, Size(9, 9)); // dilatation base element
+	Mat *pOutMat = &curFrame;	// pointer to image that will be rendered once per input video frame
+	Mat strucElem = getStructuringElement(MORPH_RECT, Size(3, 3)); // dilatation base element
 
 	// containers for output of findContours()
 	vector<Mat> contours;
@@ -62,12 +55,8 @@ int main(int argc, char** argv)
 	string filename(argv[1]);
 	string outName = filename.substr(0, filename.length() - 4) + "_out.avi";
 
-	
-	Rect lastKnownRect;
-	Point lastKnownPos;
-	
-	Point lastPos, pRectMid;
-
+	Rect lastKnownRect, lastRect;
+	Point lastKnownPos, lastPos, estimatePos, plotPos;
 	list<Point> lastKnownPositions;
 
 	// init 'live' video output window
@@ -92,20 +81,7 @@ int main(int argc, char** argv)
 
 	// build frame buffer and background subtractor
 	pMOG2 = createBackgroundSubtractorMOG2(500, 30., true);
-	pMOG2Natural = createBackgroundSubtractorMOG2(500, 30., true);
-
-
-	// build mog once
-	//while (capture.read(curFrame))
-	//{
-	//	++nFrames;
-	//	pMOG2->apply(curFrame, fgMaskMOG2);
-	//}
-	//capture.release();
-	//capture.open(filename); // free and open once more
-	//cout << "Processed " << nFrames << " frames." << endl;
-
-
+	
 	// main loop over frames
 	while (capture.read(curFrame) && (char)keyInput != 'q')
 	{
@@ -116,11 +92,6 @@ int main(int argc, char** argv)
 		GaussianBlur(grayFrame, grayFrame, Size(7, 7), 0, 0);
 
 		pMOG2->apply(grayFrame, fgMaskMOG2);
-		Mat tmpMat;
-		pMOG2Natural->apply(curFrame, tmpMat);
-
-		//absdiff(bgImg, curFrame, frameDelta); // absolute difference between background image and current frame
-		//threshold(fgMaskMOG2, fgMaskMOG2, 50., 255., CV_THRESH_BINARY);
 		
 		// erode and dilate to remove some noise
 		erode(fgMaskMOG2, frameDil, strucElem);
@@ -137,14 +108,7 @@ int main(int argc, char** argv)
 		findContours(canny_out, contours, hierarchy, CV_RETR_LIST, CV_CHAIN_APPROX_SIMPLE, Point(0, 0)); // find contours
 		sort(contours.begin(), contours.end(), rvs_cmp_contour_area); // sort by contour area, beginning with the largest
 
-		//for (vector<Mat>::iterator it = contours.begin(); it != contours.end(); it++)
-		//{
-		//	rectangle(fgMaskMOG2, boundingRect(*it), CV_RGB(255, 255, 255), 2);
-		//	imshow("Debug", fgMaskMOG2);
-		//}
-		
 		// determine largest "moving" object
-		Rect maxRect;
 		int iMaxSize = 0;
 		bool bFoundCloseContour = false;
 		for (unsigned int i = 0; i < contours.size(); i++)
@@ -158,11 +122,12 @@ int main(int argc, char** argv)
 
 			if (i == 0) // preemptively save largest contour to get back to if no "close" contour is found.
 			{
-				maxRect = boun;
-				pRectMid = bounCenter;
+				lastRect = boun;
+				lastPos = bounCenter;
 			}
 
-			if (nFrames > 1)
+			// distance validity check, but only if we recently had track of the object
+			if (nFrames > 1 && nFailedFrames < 10)
 			{
 				int dx = bounCenter.x - lastPos.x;
 				int dy = bounCenter.y - lastPos.y;
@@ -172,81 +137,70 @@ int main(int argc, char** argv)
 					continue;
 			}
 
-			maxRect = boun;
-			pRectMid = bounCenter;
+			lastRect = boun;
+			lastPos = bounCenter;
 			bFoundCloseContour = true;
 			++nSmoothFrames;
 			break;
 		}
-		if (!bFoundCloseContour) ++nFailedFrames;
 
-		//cout << bFoundCloseContour << "  " << dist2 << endl;
+		if (contours.size() == 0) {
+			// we don't see anything.
+			++nBlindFrames;
+		} else { nBlindFrames = 0; }
 
-		if (nFrames > 1)
-		{
-			// determine "medium" recent coordinates
-			uint mx = 0; uint my = 0;
+		// update last known position if smooth transition occured
+		if (bFoundCloseContour) {
+			nFailedFrames = 0;
+			lastDx = lastPos.x - lastKnownPos.x;
+			lastDy = lastPos.y - lastKnownPos.y;
 
-			if (bHardTracking) {
-				for (list<Point>::iterator it = lastKnownPositions.begin(); it != lastKnownPositions.end(); it++) {
-					mx += (*it).x; my += (*it).y;
-				}
-				mx /= lastKnownPositions.size(); my /= lastKnownPositions.size();
-			} else {
-				mx = lastPos.x; my = lastPos.y;
-			}
-			
-			int dx = pRectMid.x - mx;
-			int dy = pRectMid.y - my;
-			unsigned int deltaSq = dx*dx + dy*dy;
-			//cout << deltaSq << endl;
-			
-			if (deltaSq > DELTA_SQ_THRESH)	{
-				bJump = true;
-			} else {
-				bJump = false;
-				lastKnownRect = maxRect;
-				lastKnownPos = pRectMid;
-			}
-		}
-		lastPos = pRectMid;
+			lastKnownRect = lastRect;
+			lastKnownPos = lastPos;
 
-		// draw only the largest object
-		if (!bJump)
-		{
-			++nTrackedFrames;
-			if (lastKnownPositions.size() > LAST_POS_BUFFER_SIZE)
-				lastKnownPositions.pop_front();
-			lastKnownPositions.push_back(pRectMid);
+			plotPos = lastKnownPos;
 
-			if (bTrace) {
+			if (bTrace) { // draw trace
+				if (lastKnownPositions.size() > LAST_POS_BUFFER_SIZE)
+					lastKnownPositions.pop_front();
+				lastKnownPositions.push_back(lastPos);
+				
 				list<Point>::iterator it;
 				int i = 0;
 				for (it = lastKnownPositions.begin(); it != lastKnownPositions.end(); it++)	{
-					Scalar color(150, 30, 30);
+					Scalar color(180, 90, 30);
 					circle(*pOutMat, *it, 5, color, 2 * i);
 					++i;
 				}
 			}
-			if (bOverlay) {
-				circle(*pOutMat, pRectMid, 5, Scalar(255, 0, 0), 10, 8);
-				rectangle(*pOutMat, maxRect, Scalar(0, 255, 0), 3);
-			}
-		} else { // !bJump
-			if (bOverlay) {
-				circle(*pOutMat, lastKnownPos, 5, Scalar(255, 0, 0), 10, 8);
-				rectangle(*pOutMat, lastKnownRect, Scalar(0, 255, 0), 3);
+		} else {
+			++nFailedFrames;
+			// guess based on velocity extrapolation
+			estimatePos.x = lastKnownPos.x + nFailedFrames*lastDx;
+			estimatePos.y = lastKnownPos.y + nFailedFrames*lastDy;
+
+			if (estimatePos.x < 0 || estimatePos.y < 0 || estimatePos.x >= capture.get(CV_CAP_PROP_FRAME_WIDTH) ||
+				estimatePos.y >= capture.get(CV_CAP_PROP_FRAME_HEIGHT || nFailedFrames >= 10)) {
+				// we've totally lost track, cancel velocity extrapolation guess
+				plotPos = lastKnownPos;
+				nFailedFrames = 0;
+			} else {
+				plotPos = estimatePos;
 			}
 		}
 
+		// draw overlay (rect frame, mid point and text)
 		if (bOverlay) {
-			// draw text overlay
+			if (nBlindFrames < 6 && bFoundCloseContour) {
+				circle(*pOutMat, plotPos, 5, Scalar(255, 120, 0), 10, 8);
+				rectangle(*pOutMat, lastKnownRect, Scalar(0, 255, 0), 3);
+			}
+
 			vector<ostringstream> text(4);
 			const int lineSkip = 16;
-
 			text[0] << "Frame: " << nFrames; // frame counter
-			text[1] << "Object X: " << pRectMid.x; // moving object coordinates
-			text[2] << "Object Y: " << pRectMid.y;
+			text[1] << "Object X: " << lastKnownPos.x; // moving object coordinates
+			text[2] << "Object Y: " << lastKnownPos.y;
 			text[3] << "Smooth rate: " << setprecision(3) << 100.0*nSmoothFrames / nFrames << "%"; // tracking percentage
 
 			for (unsigned int line = 0; line < text.size(); line++) {
@@ -263,14 +217,6 @@ int main(int argc, char** argv)
 		keyInput = waitKey(5); // allow time for event loop
 	}
 
-	pMOG2Natural->getBackgroundImage(bgImg);
-	imshow("Motion tracking", bgImg);
-	imwrite("bgimg.png", bgImg);
-
-	cout << "Read " << nFrames << " frames." << endl;
-
-	waitKey(0);
-	
 	// release files
 	outputVideo.release(); 
 	capture.release();
